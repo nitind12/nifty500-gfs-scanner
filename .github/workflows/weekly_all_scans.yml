@@ -1,0 +1,71 @@
+name: Weekly All Scanners (Friday)
+
+on:
+  schedule:
+    # 10:20 UTC = 3:50 PM IST, Friday only (after the weekly candle closes)
+    - cron: '20 10 * * 5'
+  workflow_dispatch: {}
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pandas numpy yfinance requests
+
+      - name: Run RSI screener - Weekly TF (Quarterly/Monthly/Weekly)
+        continue-on-error: true
+        env:
+          OUTPUT_DIR: output
+          LOCAL_FALLBACK_LIST: ind_nifty500list.csv
+        run: python nifty500_rsi_screener_weekly.py
+
+      - name: Run Breakout scanner - Weekly TF (Nifty 500)
+        continue-on-error: true
+        env:
+          OUTPUT_DIR: output
+          LOCAL_FALLBACK_LIST: ind_nifty500list.csv
+        run: python breakout_scanner_weekly.py
+
+      - name: Run MIB Watchlist scanner - Weekly TF
+        continue-on-error: true
+        env:
+          OUTPUT_DIR: output
+        run: python mib_scanner_yfinance_weekly.py
+
+      - name: Run MIB Market scanner - Weekly TF
+        continue-on-error: true
+        env:
+          OUTPUT_DIR: output
+        run: python mib_market_scanner_weekly.py
+
+      - name: Run Engulfing @ S/R scanner - Weekly TF (Nifty 500)
+        continue-on-error: true
+        env:
+          OUTPUT_DIR: output
+          LOCAL_FALLBACK_LIST: ind_nifty500list.csv
+          INDEX_CHOICE: NIFTY500
+          TF_CHOICE: "8"
+        run: python nifty_engulf_scanner_weekly.py
+
+      - name: Send combined weekly email with all CSVs
+        env:
+          OUTPUT_DIR: output
+          EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+        run: python send_combined_email_weekly.py
+
+      - name: Upload all CSVs as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-scan-results
+          path: output/*.csv
