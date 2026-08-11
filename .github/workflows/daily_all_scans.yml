@@ -55,7 +55,12 @@ jobs:
           INDEX_CHOICE: NIFTY500
           TF_CHOICE: "7"
         run: python nifty_engulf_scanner.py
-
+      - name: Run Pharma Breakout scanner (Weekly TF)
+        continue-on-error: true
+        env:
+          OUTPUT_DIR: output
+        run: python pharma_breakout_scanner.py
+        
       - name: Send combined email with all CSVs
         env:
           OUTPUT_DIR: output
