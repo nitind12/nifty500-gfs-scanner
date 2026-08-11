@@ -1,9 +1,9 @@
 name: Nifty50 Daily Breakout Scan
 
 on:
-  schedule:
+    # schedule:
     # 10:20 UTC = 3:50 PM IST, Monday-Friday (runs alongside the RSI scan)
-    - cron: '20 10 * * 1-5'
+    # - cron: '20 10 * * 1-5'
   workflow_dispatch: {}
 
 jobs:
