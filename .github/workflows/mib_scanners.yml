@@ -1,0 +1,59 @@
+# Sample GitHub Actions workflow for the two MIB scanners.
+# Place this file at: .github/workflows/mib_scanners.yml in your repo.
+#
+# Assumes (matching your existing 5-scanner pipeline):
+# - requirements.txt at repo root (yfinance, pandas, numpy)
+# - mib_market_scanner.py and mib_scanner_yfinance.py at repo root
+# - send_combined_email.py that bundles CSVs from the "output" folder
+#   and emails them via Gmail SMTP + App Password
+# - GitHub Secrets: GMAIL_ADDRESS, GMAIL_APP_PASSWORD (or whatever names
+#   your existing send_combined_email.py expects - adjust below)
+#
+# Runs on weekdays at 3:50 PM IST (10:20 UTC), same schedule as your
+# other scanners. Adjust the cron if you want a different time.
+
+name: MIB Scanners (Market + Watchlist)
+
+on:
+  schedule:
+    - cron: "20 10 * * 1-5"   # 15:50 IST, Mon-Fri
+  workflow_dispatch: {}        # allows manual "Run workflow" trigger too
+
+jobs:
+  run-scanners:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run MIB Market Scanner (Nifty 50/500)
+        run: python mib_market_scanner.py
+        env:
+          OUTPUT_DIR: output
+
+      - name: Run MIB Watchlist Scanner (fixed list)
+        run: python mib_scanner_yfinance.py
+        env:
+          OUTPUT_DIR: output
+
+      - name: Send combined email
+        run: python send_combined_email.py
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          OUTPUT_DIR: output
+
+      - name: Upload CSVs as workflow artifact (backup, 7-day retention)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mib-scan-results-${{ github.run_id }}
+          path: output/*.csv
+          retention-days: 7
