@@ -8,16 +8,32 @@ setups - so you don't have to manually check every stock's chart one by one.
 
 WHAT IT DOES
 1. Loops through every stock in UNIVERSE (edit this list any time)
-2. For each stock: finds the most recent Mother Bar + inside bars on 1H
-3. Checks breakout direction (up or down), RSI(14), MACD(12,26,9),
+2. For each stock: finds the real Mother Bar (tracing the full inside-bar
+   chain backwards, not just the first/smallest qualifying pair) on 1H
+3. Checks FRESH breakout direction only (i.e. the break happened on the
+   latest closed candle, not several candles ago), RSI(14), MACD(12,26,9),
    and Daily bias (EMA20)
-4. LONG setup   = breakout UP + Daily bias BULLISH + RSI < 70 + MACD hist > 0
-5. SHORT setup  = breakout DOWN + Daily bias BEARISH + RSI > 30 + MACD hist < 0
+4. LONG setup   = fresh breakout UP + Daily bias BULLISH + RSI < 70 + MACD hist > 0
+5. SHORT setup  = fresh breakout DOWN + Daily bias BEARISH + RSI > 30 + MACD hist < 0
    (RSI > 30 avoids chasing an already-oversold move)
 6. Adds ATR(14)-based stop-loss distance and position sizing for every
    actionable setup (LONG or SHORT), sized to a fixed % of your capital
 7. Ranks all actionable setups by strength so the best candidates float up
 8. Prints two ranked reports (LONG table + SHORT table) + saves a CSV
+
+FIX LOG (14 Aug 2026)
+- find_mother_bar(): old version stopped at the FIRST (usually tiny, most
+  recent) qualifying mother+inside-bar pair. It now walks backwards and
+  extends the mother as far back as possible, as long as every bar in
+  between stays fully inside that candle's High/Low range - so it finds
+  the real, larger Mother candle, matching how you read it visually on
+  the chart.
+- classify_breakout(): old version only checked "is latest close beyond
+  mother high/low" which stayed BREAKOUT_UP/DOWN forever after an old
+  break, even if price was just drifting sideways many candles later. It
+  now requires the PREVIOUS closed candle to still have been inside the
+  mother's range, so only a FRESH breakout (happening on the newest
+  candle) is flagged.
 
 USAGE
   pip install yfinance pandas --break-system-packages
@@ -36,7 +52,10 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-OUTPUT_DIR = os.environ.get("OUTPUT_DIR", r"D:\dhan\scanner\gfs")
+# Works both locally (set OUTPUT_DIR to your D:\dhan\... path via env var)
+# and on GitHub Actions (defaults to a relative "output" folder in the
+# repo, which the workflow can then pick up for the combined email step).
+OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "output")
 
 # ---------------------------------------------------------------------------
 # UNIVERSE - the stocks to scan. Edit / extend freely.
@@ -151,36 +170,76 @@ def risk_sizing(entry_price: float, atr_val: float, setup_type: str, symbol_clea
 
 
 # ---------------------------------------------------------------------------
-# MIB DETECTION (same logic as watchlist scanner)
+# MIB DETECTION (FIXED - traces the real mother candle, checks fresh breakout only)
 # ---------------------------------------------------------------------------
 def find_mother_bar(df: pd.DataFrame, lookback: int, min_inside: int):
-    recent = df.iloc[-(lookback + 5):-1]
+    """
+    Correct MIB logic:
+    - Look at the window of recent CLOSED bars (excluding the very latest bar,
+      which is checked separately for a fresh breakout).
+    - Anchor at the second-to-last closed bar and walk BACKWARDS: bar M can
+      be the mother only if EVERY bar between M and the anchor (inclusive)
+      sits fully inside M's High/Low range.
+    - Keep extending backwards while containment holds. The furthest-back
+      bar for which containment still holds is the TRUE mother - the real,
+      larger candle that contains the whole unbroken inside-bar chain.
+    - This fixes the old bug where the loop stopped at the FIRST (usually
+      tiny, most recent) qualifying mother+inside-bar pair instead of
+      tracing the chain back to the actual mother candle you'd circle on
+      the chart.
+    """
+    recent = df.iloc[-(lookback + 5):-1]  # closed bars, excludes current forming bar
     n = len(recent)
-    best = None
-    for i in range(n - min_inside - 1, -1, -1):
-        mother = recent.iloc[i]
-        m_high, m_low = mother["High"], mother["Low"]
-        inside_count = 0
-        j = i + 1
-        while j < n:
-            bar = recent.iloc[j]
-            if bar["High"] <= m_high and bar["Low"] >= m_low:
-                inside_count += 1
-                j += 1
-            else:
-                break
-        if inside_count >= min_inside:
-            best = {
-                "mother_high": m_high,
-                "mother_low": m_low,
-                "inside_bars": inside_count,
-            }
+    if n < min_inside + 1:
+        return None
+
+    anchor_idx = n - 2  # bar right before the newest closed bar
+    if anchor_idx < 0:
+        return None
+
+    mother_idx = anchor_idx
+    i = anchor_idx - 1
+    while i >= 0:
+        candidate = recent.iloc[i]
+        c_high, c_low = candidate["High"], candidate["Low"]
+        chain = recent.iloc[i + 1: anchor_idx + 1]
+        if (chain["High"] <= c_high).all() and (chain["Low"] >= c_low).all():
+            mother_idx = i
+            i -= 1
+        else:
             break
-    return best
+
+    inside_count = anchor_idx - mother_idx
+    if inside_count < min_inside:
+        return None
+
+    mother = recent.iloc[mother_idx]
+    return {
+        "mother_high": mother["High"],
+        "mother_low": mother["Low"],
+        "inside_bars": inside_count,
+    }
 
 
 def classify_breakout(df: pd.DataFrame, mother: dict):
+    """
+    FRESH breakout only:
+    - the PREVIOUS closed bar must still have been INSIDE the mother's range
+    - the CURRENT (latest) bar's close must break outside that range
+    This avoids flagging BREAKOUT_UP/DOWN on an old break that happened
+    several candles ago, with price just drifting since - which was the
+    bug causing false-positive "actionable" setups.
+    """
     latest = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    prev_was_inside = (
+        prev["High"] <= mother["mother_high"] and prev["Low"] >= mother["mother_low"]
+    )
+
+    if not prev_was_inside:
+        return "NOT_FRESH", latest
+
     if latest["Close"] > mother["mother_high"]:
         direction = "BREAKOUT_UP"
     elif latest["Close"] < mother["mother_low"]:
@@ -267,20 +326,22 @@ def scan_stock(symbol: str):
     # got filtered out shows you exactly which condition failed
     reason = "Actionable"
     if setup_type == "-":
-        if direction == "INSIDE_BOX":
+        if direction == "NOT_FRESH":
+            reason = "Break already happened earlier - not a fresh breakout this candle"
+        elif direction == "INSIDE_BOX":
             reason = "Still inside the mother bar box - no breakout yet"
         elif direction == "BREAKOUT_UP" and bias != "BULLISH":
-            reason = "Broke box upward but Daily bias not bullish"
+            reason = "Fresh breakout upward but Daily bias not bullish"
         elif direction == "BREAKOUT_UP" and rsi_val is not None and rsi_val >= RSI_HARD_FILTER:
-            reason = f"Broke box upward but RSI {rsi_val} >= {RSI_HARD_FILTER} (overbought)"
+            reason = f"Fresh breakout upward but RSI {rsi_val} >= {RSI_HARD_FILTER} (overbought)"
         elif direction == "BREAKOUT_UP" and hist_val is not None and hist_val <= 0:
-            reason = "Broke box upward but MACD histogram not positive"
+            reason = "Fresh breakout upward but MACD histogram not positive"
         elif direction == "BREAKOUT_DOWN" and bias != "BEARISH":
-            reason = "Broke box downward but Daily bias not bearish"
+            reason = "Fresh breakout downward but Daily bias not bearish"
         elif direction == "BREAKOUT_DOWN" and rsi_val is not None and rsi_val <= RSI_BEARISH_FLOOR:
-            reason = f"Broke box downward but RSI {rsi_val} <= {RSI_BEARISH_FLOOR} (oversold)"
+            reason = f"Fresh breakout downward but RSI {rsi_val} <= {RSI_BEARISH_FLOOR} (oversold)"
         elif direction == "BREAKOUT_DOWN" and hist_val is not None and hist_val >= 0:
-            reason = "Broke box downward but MACD histogram not negative"
+            reason = "Fresh breakout downward but MACD histogram not negative"
         else:
             reason = "Conditions not aligned"
 

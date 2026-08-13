@@ -27,15 +27,27 @@ USAGE
 You can edit the WATCHLIST below to add/remove stocks any time.
 """
 
+import os
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import os
 from datetime import datetime
 
-# Cloud/local output folder - defaults to your Windows path, overridden by
-# GitHub Actions via OUTPUT_DIR env var (see workflow yml).
-OUTPUT_DIR = os.environ.get("OUTPUT_DIR", r"D:\dhan\scanner\gfs")
+# Works both locally (set OUTPUT_DIR to your D:\dhan\... path) and on
+# GitHub Actions (defaults to a relative "output" folder in the repo,
+# which the workflow can then pick up for the combined email step).
+OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "output")
+
+# FIX LOG (14 Aug 2026)
+# - find_mother_bar(): old version stopped at the FIRST (usually tiny, most
+#   recent) qualifying mother+inside-bar pair. It now walks backwards and
+#   extends the mother as far back as possible, as long as every bar in
+#   between stays fully inside that candle's High/Low range - so it finds
+#   the real, larger Mother candle, matching how you read it visually.
+# - classify_breakout(): old version kept flagging BREAKOUT_UP/DOWN forever
+#   after an old break, even if price was just drifting sideways many
+#   candles later. It now requires the PREVIOUS closed candle to still have
+#   been inside the mother's range, so only a FRESH breakout is flagged.
 
 # ---------------------------------------------------------------------------
 # CONFIG - edit this list to scan new stocks. NSE symbols need ".NS" suffix.
@@ -144,50 +156,72 @@ def risk_sizing(entry_price: float, atr_val: float, direction: str, symbol_clean
 # ---------------------------------------------------------------------------
 def find_mother_bar(df: pd.DataFrame, lookback: int, min_inside: int):
     """
-    Scans the last `lookback` bars (excluding the very latest bar) for a
-    mother bar: a candle whose range fully contains at least `min_inside`
-    subsequent candles (their high/low stay inside mother's high/low).
-    Returns dict with mother bar info, or None if not found.
-    Picks the MOST RECENT valid mother bar (closest to current price).
+    Correct MIB logic:
+    - Look at the window of recent CLOSED bars (excluding the very latest bar,
+      which is checked separately for a fresh breakout).
+    - Anchor at the second-to-last closed bar and walk BACKWARDS: bar M can
+      be the mother only if EVERY bar between M and the anchor (inclusive)
+      sits fully inside M's High/Low range.
+    - Keep extending backwards while containment holds. The furthest-back
+      bar for which containment still holds is the TRUE mother - the real,
+      larger candle that contains the whole unbroken inside-bar chain.
+    - This fixes the old bug where the loop stopped at the FIRST (usually
+      tiny, most recent) qualifying mother+inside-bar pair instead of
+      tracing the chain back to the actual mother candle you'd circle on
+      the chart.
     """
     recent = df.iloc[-(lookback + 5):-1]  # exclude latest forming/last bar
     n = len(recent)
+    if n < min_inside + 1:
+        return None
 
-    best = None
-    for i in range(n - min_inside - 1, -1, -1):  # scan backwards, prefer recent
-        mother = recent.iloc[i]
-        m_high, m_low = mother["High"], mother["Low"]
+    anchor_idx = n - 2  # bar right before the newest closed bar
+    if anchor_idx < 0:
+        return None
 
-        inside_count = 0
-        j = i + 1
-        while j < n:
-            bar = recent.iloc[j]
-            if bar["High"] <= m_high and bar["Low"] >= m_low:
-                inside_count += 1
-                j += 1
-            else:
-                break
+    mother_idx = anchor_idx
+    i = anchor_idx - 1
+    while i >= 0:
+        candidate = recent.iloc[i]
+        c_high, c_low = candidate["High"], candidate["Low"]
+        chain = recent.iloc[i + 1: anchor_idx + 1]
+        if (chain["High"] <= c_high).all() and (chain["Low"] >= c_low).all():
+            mother_idx = i
+            i -= 1
+        else:
+            break
 
-        if inside_count >= min_inside:
-            best = {
-                "mother_idx": recent.index[i],
-                "mother_high": m_high,
-                "mother_low": m_low,
-                "inside_bars": inside_count,
-                "last_inside_idx": recent.index[j - 1] if j > i + 1 else recent.index[i],
-            }
-            break  # most recent qualifying mother bar found
+    inside_count = anchor_idx - mother_idx
+    if inside_count < min_inside:
+        return None
 
-    return best
+    mother = recent.iloc[mother_idx]
+    return {
+        "mother_idx": recent.index[mother_idx],
+        "mother_high": mother["High"],
+        "mother_low": mother["Low"],
+        "inside_bars": inside_count,
+        "last_inside_idx": recent.index[anchor_idx],
+    }
 
 
 def classify_breakout(df: pd.DataFrame, mother: dict):
     """
-    Compares latest closed bar to mother bar range to see if price has
-    broken out (up/down/none) and whether it's a clean body-close break.
+    FRESH breakout only:
+    - the PREVIOUS closed bar must still have been INSIDE the mother's range
+    - the CURRENT (latest) bar's close must break outside that range
+    This avoids flagging BREAKOUT_UP/DOWN on an old break that happened
+    several candles ago, with price just drifting since - which was the
+    bug causing false-positive "actionable" setups (e.g. BAJFINANCE showing
+    a breakout that had actually already played out candles earlier).
     """
     latest = df.iloc[-1]
+    prev = df.iloc[-2]
     m_high, m_low = mother["mother_high"], mother["mother_low"]
+
+    prev_was_inside = (prev["High"] <= m_high and prev["Low"] >= m_low)
+    if not prev_was_inside:
+        return "NOT_FRESH", latest
 
     if latest["Close"] > m_high:
         direction = "BREAKOUT_UP"
@@ -283,7 +317,9 @@ def scan_stock(symbol: str):
     # that got filtered out shows you exactly which condition failed
     reason = "Actionable"
     if not actionable:
-        if direction == "INSIDE_BOX":
+        if direction == "NOT_FRESH":
+            reason = "Break already happened earlier - not a fresh breakout this candle"
+        elif direction == "INSIDE_BOX":
             reason = "Still inside the mother bar box - no breakout yet"
         elif direction == "BREAKOUT_UP" and bias != "BULLISH":
             reason = "Broke box upward but Daily bias not bullish"
@@ -348,7 +384,6 @@ def main():
     out = pd.DataFrame(rows)
     csv_path = os.path.join(OUTPUT_DIR, f"mib_watchlist_scan_{datetime.now().strftime('%Y%m%d')}.csv")
     out.to_csv(csv_path, index=False)
-    print(f"\nSaved: {csv_path}")
 
     pd.set_option("display.width", 250)
     pd.set_option("display.max_columns", None)
@@ -407,6 +442,8 @@ def main():
         print("(sl_distance/suggested_qty are based on the UNDERLYING's move, not option premium.")
         print(" suggested_lots uses LOT_SIZES dict - add your symbols there. Still only a reference:")
         print(" premium moves less than spot due to Delta, so confirm real premium risk before entry.)")
+
+    print(f"\nFull results saved to: {csv_path}")
 
 
 if __name__ == "__main__":
