@@ -78,6 +78,12 @@ jobs:
             echo "Engulfing dated CSV not found"
           fi
 
+      - name: Remove scanners with no eligible data
+        continue-on-error: true
+        env:
+          OUTPUT_DIR: output
+        run: python cleanup_empty_scan_results.py
+
       - name: Send combined email with latest CSVs only
         env:
           OUTPUT_DIR: output
