@@ -25,16 +25,16 @@ import sys
 import time
 
 # ---------------- CONFIG ----------------
-OUTPUT_DIR = r"D:\dhan\scanner\gfs"   # change if needed
+OUTPUT_DIR = os.environ.get("OUTPUT_DIR", r"D:\\dhan\\scanner\\gfs")
 NIFTY500_LIST_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
-LOCAL_FALLBACK_LIST = r"D:\dhan\ind_nifty500list.csv"  # keep a manual backup copy here
+LOCAL_FALLBACK_LIST = os.environ.get("LOCAL_FALLBACK_LIST", r"D:\\dhan\\ind_nifty500list.csv")
 
 DAILY_SUPPORT_LOW = 35
 DAILY_SUPPORT_HIGH = 45
-DAILY_LOOKBACK_BARS = 3   # how many recent daily bars to check for the RSI-40 touch
+DAILY_LOOKBACK_BARS = 3
 RSI_PERIOD = 14
 
-REQUEST_PAUSE_SEC = 0.3    # small delay between tickers to avoid throttling
+REQUEST_PAUSE_SEC = 0.3
 # -----------------------------------------
 
 
@@ -55,8 +55,7 @@ def get_nifty500_symbols():
             return symbols
         else:
             print("No fallback list found. Please download ind_nifty500list.csv from "
-                  "NSE (https://www.niftyindices.com/indices/equity/broad-based-indices/nifty-500) "
-                  f"and save it to {LOCAL_FALLBACK_LIST}")
+                  "NSE and save it to the configured LOCAL_FALLBACK_LIST.")
             sys.exit(1)
 
 
@@ -76,7 +75,6 @@ def compute_rsi(series, period=RSI_PERIOD):
 def check_stock(symbol):
     """Returns dict of result if stock passes all 3 conditions, else None."""
     try:
-        # Daily data - need enough history for monthly RSI(14) => ~15+ months minimum
         daily = yf.download(symbol, period="3y", interval="1d", progress=False, auto_adjust=True)
         if daily.empty or len(daily) < 250:
             return None
@@ -86,9 +84,7 @@ def check_stock(symbol):
 
         close_daily = daily["Close"].dropna()
 
-        # Weekly resample (Friday close)
         weekly = close_daily.resample("W-FRI").last().dropna()
-        # Monthly resample (month end close)
         monthly = close_daily.resample("ME").last().dropna()
 
         if len(weekly) < RSI_PERIOD + 1 or len(monthly) < RSI_PERIOD + 1:
@@ -105,11 +101,9 @@ def check_stock(symbol):
         latest_weekly_rsi = rsi_weekly.iloc[-1]
         latest_monthly_rsi = rsi_monthly.iloc[-1]
 
-        # Condition 1 & 2
         if not (latest_monthly_rsi > 60 and latest_weekly_rsi > 60):
             return None
 
-        # Condition 3: daily RSI took support near 40 recently and is bouncing
         recent_daily_rsi = rsi_daily.tail(DAILY_LOOKBACK_BARS)
         touched_support = recent_daily_rsi.between(DAILY_SUPPORT_LOW, DAILY_SUPPORT_HIGH).any()
         recent_min = recent_daily_rsi.min()
@@ -143,7 +137,7 @@ def main():
         print(f"[{i}/{total}] Checking {sym}...")
         res = check_stock(sym)
         if res:
-            print(f"  ✅ MATCH: {sym}")
+            print(f"  MATCH: {sym}")
             results.append(res)
         time.sleep(REQUEST_PAUSE_SEC)
 
