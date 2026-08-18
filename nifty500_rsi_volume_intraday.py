@@ -10,8 +10,9 @@ Data source: yfinance.
 
 Implementation note:
 - Daily RSI is calculated from daily closing prices.
-- 4H candles are constructed from 1-hour OHLCV data. The resampling is
-  aligned to 4-hour buckets and uses the last completed 4H candle.
+- 4H candles are constructed from 1-hour OHLCV data and aligned to NSE
+  market-session boundaries starting at 09:15 IST. The current incomplete
+  4H candle is excluded, so RSI is based only on a completed 4H candle.
 - Hourly volume condition uses the latest available 1H candle volume.
 
 Outputs:
@@ -82,12 +83,16 @@ def compute_rsi(series, period=RSI_PERIOD):
     return 100 - (100 / (1 + rs))
 
 
-def build_4h( hourly):
-    """Build 4H OHLCV candles from 1H data."""
+def build_4h(hourly):
+    """Build completed 4H OHLCV candles aligned to NSE 09:15 session start."""
     hourly = hourly.copy()
     hourly = hourly[~hourly.index.duplicated(keep="last")]
 
-    four_h = hourly.resample("4h", origin="start_day").agg(
+    # 1h timestamps are aligned around 09:15, 10:15, ... on NSE data.
+    # Offset 1h15m makes 4h buckets begin at 09:15 and 13:15.
+    four_h = hourly.resample(
+        "4h", origin="start_day", offset="1h15min"
+    ).agg(
         {
             "Open": "first",
             "High": "max",
@@ -97,14 +102,16 @@ def build_4h( hourly):
         }
     ).dropna(subset=["Open", "High", "Low", "Close"])
 
-    # The last 4H bucket may still be forming. Exclude it when it is
-    # incomplete relative to the most recent hourly candle.
-    if len(four_h) > 1:
-        last_bucket_start = four_h.index[-1]
-        latest_hour = hourly.index[-1]
-        bucket_end = last_bucket_start + pd.Timedelta(hours=4)
-        if latest_hour < bucket_end - pd.Timedelta(hours=1):
-            four_h = four_h.iloc[:-1]
+    if len(four_h) < 2:
+        return four_h
+
+    # A normal NSE session does not contain a full second 4H candle.
+    # Exclude the most recent bucket unless it contains a full 4 hours
+    # of hourly observations. This prevents RSI from using an incomplete bar.
+    latest_bucket = four_h.index[-1]
+    latest_hours = hourly.loc[hourly.index >= latest_bucket]
+    if len(latest_hours) < 4:
+        four_h = four_h.iloc[:-1]
 
     return four_h
 
@@ -139,7 +146,6 @@ def check_stock(symbol):
             subset=["Open", "High", "Low", "Close", "Volume"]
         )
         hourly["Volume"] = hourly["Volume"].astype(float)
-        hourly_close = hourly["Close"].astype(float)
 
         four_h = build_4h(hourly)
         if len(four_h) < RSI_PERIOD + 1:
