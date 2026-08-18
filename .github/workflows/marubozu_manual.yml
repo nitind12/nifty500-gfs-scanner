@@ -1,0 +1,97 @@
+name: Marubozu Reversal Scanner - Manual
+
+on:
+  workflow_dispatch:
+    inputs:
+      timeframe:
+        description: 'Choose timeframe'
+        required: true
+        default: DAILY
+        type: choice
+        options:
+          - DAILY
+          - WEEKLY
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pandas numpy yfinance requests
+
+      - name: Run Marubozu reversal scanner
+        continue-on-error: true
+        env:
+          OUTPUT_DIR: output
+          LOCAL_FALLBACK_LIST: ind_nifty500list.csv
+          TIMEFRAME: ${{ inputs.timeframe }}
+        run: python nifty500_marubozu_reversal_scanner.py
+
+      - name: Remove no-data scanner output
+        env:
+          OUTPUT_DIR: output
+        run: python cleanup_empty_scan_results.py
+
+      - name: Send standalone Marubozu email only when results exist
+        env:
+          OUTPUT_DIR: output
+          TIMEFRAME: ${{ inputs.timeframe }}
+          EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+        run: |
+          python - <<'PY'
+          import glob
+          import os
+          import smtplib
+          from email.message import EmailMessage
+          from datetime import datetime
+
+          output_dir = os.environ.get('OUTPUT_DIR', 'output')
+          timeframe = os.environ.get('TIMEFRAME', 'DAILY')
+          files = sorted(glob.glob(os.path.join(output_dir, '*marubozu*latest.csv')))
+
+          if not files:
+              print('No eligible Marubozu result. No email will be sent.')
+              raise SystemExit(0)
+
+          sender = os.environ['EMAIL_ADDRESS']
+          password = os.environ['EMAIL_APP_PASSWORD']
+          recipient = os.environ['RECIPIENT_EMAIL']
+
+          msg = EmailMessage()
+          msg['Subject'] = f'Marubozu Reversal Scanner - {timeframe} - {datetime.now().strftime("%Y-%m-%d")} '
+          msg['From'] = sender
+          msg['To'] = recipient
+          msg.set_content(
+              f'Marubozu Reversal Scanner ({timeframe}) completed.\n\n'
+              'Eligible results are attached.\n\n'
+              'Criteria include: Green Marubozu after a fall OR Red Marubozu after a rise/high, '
+              'with latest candle volume greater than 10,000 shares.'
+          )
+
+          for path in files:
+              with open(path, 'rb') as f:
+                  msg.add_attachment(f.read(), maintype='text', subtype='csv', filename=os.path.basename(path))
+
+          with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+              smtp.login(sender, password)
+              smtp.send_message(msg)
+
+          print(f'Sent Marubozu email with {len(files)} attachment(s).')
+          PY
+
+      - name: Upload Marubozu results
+        if: hashFiles('output/*.csv') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: marubozu-${{ inputs.timeframe }}-results
+          path: output/*.csv
