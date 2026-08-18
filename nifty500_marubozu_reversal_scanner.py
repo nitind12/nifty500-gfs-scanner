@@ -11,8 +11,9 @@ Supported timeframes:
     HOURLY  -> 1-hour candles, volume > 50,000
 
 Definitions:
-- Marubozu: candle body >= 90% of the full High-Low range and each wick <= 10%
-  of the range. Green means Close > Open; Red means Close < Open.
+- Strict Marubozu: candle has NO upper wick and NO lower wick. The open/close
+  must touch the candle's high/low exactly (within a tiny floating-point tolerance).
+  Green means Close > Open; Red means Close < Open.
 - "After a fall": the previous 5 completed candles have a net decline in
   closing price of at least 3%, and the latest candle is the green Marubozu.
 - "After a high": the previous 5 completed candles have a net rise in
@@ -48,7 +49,6 @@ elif TIMEFRAME == "WEEKLY":
     MIN_CANDLE_VOLUME = 100000
 elif TIMEFRAME == "HOURLY":
     INTERVAL = "1h"
-    # Yahoo limits intraday history; 60d is sufficient for this 5-bar setup.
     PERIOD = "60d"
     PREFIX = "nifty500_marubozu_hourly"
     MIN_CANDLE_VOLUME = 50000
@@ -57,9 +57,8 @@ else:
 
 FALL_LOOKBACK = 5
 MIN_TREND_MOVE_PCT = 3.0
-MIN_BODY_RATIO = 0.90
-MAX_WICK_RATIO = 0.10
 SLEEP_BETWEEN_CALLS = 0.20
+EPSILON = 1e-8
 
 NSE_NIFTY500_CSV_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
 LOCAL_FALLBACK_LIST = os.environ.get("LOCAL_FALLBACK_LIST", "ind_nifty500list.csv")
@@ -98,7 +97,6 @@ def load_symbols():
 
 
 def drop_incomplete_hour(df):
-    """Exclude the current in-progress 1-hour bar when it is not complete."""
     if TIMEFRAME != "HOURLY" or df.empty:
         return df
 
@@ -109,8 +107,6 @@ def drop_incomplete_hour(df):
     else:
         last_ts = last_ts.tz_convert("Asia/Kolkata")
 
-    # Yahoo's NSE 1h timestamps represent the bar start. A bar is complete
-    # one hour after its timestamp.
     if now < last_ts + pd.Timedelta(hours=1):
         df = df.iloc[:-1]
     return df
@@ -147,22 +143,19 @@ def marubozu_type(row):
     if candle_range <= 0:
         return None
 
-    body = abs(close - opn)
+    # Strict Marubozu: no wick at all.
+    # Green: Open == Low and Close == High.
+    # Red: Open == High and Close == Low.
     upper_wick = high - max(opn, close)
     lower_wick = min(opn, close) - low
+    tolerance = max(candle_range * EPSILON, 1e-7)
 
-    body_ratio = body / candle_range
-    upper_ratio = upper_wick / candle_range
-    lower_ratio = lower_wick / candle_range
-
-    if body_ratio < MIN_BODY_RATIO:
-        return None
-    if upper_ratio > MAX_WICK_RATIO or lower_ratio > MAX_WICK_RATIO:
+    if upper_wick > tolerance or lower_wick > tolerance:
         return None
 
-    if close > opn:
+    if close > opn and abs(opn - low) <= tolerance and abs(close - high) <= tolerance:
         return "GREEN"
-    if close < opn:
+    if close < opn and abs(opn - high) <= tolerance and abs(close - low) <= tolerance:
         return "RED"
     return None
 
@@ -228,7 +221,7 @@ def main():
     print("=" * 90)
     print(f"Criteria: Green Marubozu after >= {MIN_TREND_MOVE_PCT}% fall OR "
           f"Red Marubozu after >= {MIN_TREND_MOVE_PCT}% rise/high")
-    print(f"Marubozu: body >= {MIN_BODY_RATIO*100:.0f}% of range; each wick <= {MAX_WICK_RATIO*100:.0f}%")
+    print("Marubozu: STRICT - NO upper wick and NO lower wick")
     print(f"Volume: Marubozu candle volume > {MIN_CANDLE_VOLUME:,} shares")
 
     symbols = load_symbols()
