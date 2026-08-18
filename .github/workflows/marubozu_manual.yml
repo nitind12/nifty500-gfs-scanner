@@ -10,6 +10,7 @@ on:
         type: choice
         options:
           - DAILY
+          - HOURLY
           - WEEKLY
 
 jobs:
@@ -67,15 +68,17 @@ jobs:
           password = os.environ['EMAIL_APP_PASSWORD']
           recipient = os.environ['RECIPIENT_EMAIL']
 
+          volume_text = {'DAILY': '> 60,000', 'HOURLY': '> 50,000', 'WEEKLY': '> 100,000'}.get(timeframe, 'timeframe-specific threshold')
+
           msg = EmailMessage()
-          msg['Subject'] = f'Marubozu Reversal Scanner - {timeframe} - {datetime.now().strftime("%Y-%m-%d")} '
+          msg['Subject'] = f'Marubozu Reversal Scanner - {timeframe} - {datetime.now().strftime("%Y-%m-%d")}'
           msg['From'] = sender
           msg['To'] = recipient
           msg.set_content(
               f'Marubozu Reversal Scanner ({timeframe}) completed.\n\n'
               'Eligible results are attached.\n\n'
-              'Criteria include: Green Marubozu after a fall OR Red Marubozu after a rise/high, '
-              'with latest candle volume greater than 10,000 shares.'
+              'Criteria: Green Marubozu after a fall OR Red Marubozu after a rise/high, '
+              f'with latest candle volume {volume_text} shares.'
           )
 
           for path in files:
