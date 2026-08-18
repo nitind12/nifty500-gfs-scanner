@@ -4,12 +4,15 @@ Send ONE daily email containing only scanners with real eligible data.
 Rules:
 - Only *_latest.csv files are candidates.
 - Empty/header-only CSVs are ignored.
+- MIB is emailed only when ACTIONABLE=YES exists.
+- Engulfing is emailed only when at least one bullish/bearish setup exists.
 - If no scanner has eligible data, NO email is sent.
 - Historical dated CSVs are never emailed.
 """
 
 import os
 import glob
+import re
 import datetime as dt
 import smtplib
 import pandas as pd
@@ -25,7 +28,19 @@ RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL")
 
 
 def has_real_data(path):
-    """Return True only when the CSV contains at least one real data row."""
+    """Return True only when the scanner output contains an eligible result."""
+    name = os.path.basename(path).lower()
+
+    # Engulfing output is a human-readable multi-section CSV/text file.
+    if "engulfing" in name:
+        text = open(path, "r", encoding="utf-8", errors="ignore").read()
+        counts = [int(x) for x in re.findall(r"-\s*(\d+)\s+found", text, flags=re.I)]
+        if counts:
+            return sum(counts) > 0
+        return bool(re.search(r"\b(BULLISH|BEARISH).*?(SETUP|ENGULFING)", text, flags=re.I)) and not re.search(
+            r"No bullish.*No bearish", text, flags=re.I | re.S
+        )
+
     try:
         df = pd.read_csv(path)
     except Exception as exc:
@@ -35,12 +50,18 @@ def has_real_data(path):
     if df.empty:
         return False
 
-    # Treat rows containing no meaningful values as empty.
-    meaningful = df.dropna(how="all")
+    # MIB contains rows for scanned stocks; only actionable setups count.
+    if "ACTIONABLE" in df.columns:
+        values = df["ACTIONABLE"].astype(str).str.strip().str.upper()
+        return (values == "YES").any()
+
+    if "setup_type" in df.columns:
+        values = df["setup_type"].astype(str).str.strip().str.upper()
+        return values.isin({"LONG", "SHORT", "BULLISH", "BEARISH"}).any()
+
+    meaningful = df.dropna(how="all").copy()
     if meaningful.empty:
         return False
-
-    # Ignore rows where every value is blank/whitespace.
     for col in meaningful.columns:
         meaningful[col] = meaningful[col].astype(str).str.strip()
     meaningful = meaningful.replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
@@ -61,7 +82,7 @@ def main():
         else:
             print(f"SKIP EMAIL: {os.path.basename(path)} -> no eligible data")
 
-    # Critical rule: no data anywhere means no email at all.
+    # Critical rule: if nothing actionable was found anywhere, do not send any email.
     if not csv_files:
         print(f"No scanner has eligible data in {OUTPUT_DIR} - NO EMAIL WILL BE SENT.")
         return
@@ -75,7 +96,6 @@ def main():
         "Daily scan run complete. Only scanners with eligible results are attached:\n",
     ]
     body_lines.extend(f"  - {os.path.basename(f)}" for f in csv_files)
-    body_lines.append("\nHistorical dated CSVs remain available in the GitHub Actions artifact.")
     msg.attach(MIMEText("\n".join(body_lines), "plain"))
 
     for csv_path in csv_files:
