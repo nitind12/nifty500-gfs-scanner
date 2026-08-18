@@ -9,16 +9,17 @@ The same script is used by Daily and Weekly workflows through TIMEFRAME:
     TIMEFRAME=DAILY   -> daily candles
     TIMEFRAME=WEEKLY  -> weekly candles
 
-Definitions used here (kept deliberately objective for unattended scanning):
+Definitions:
 - Marubozu: candle body >= 90% of the full High-Low range and each wick <= 10%
   of the range. Green means Close > Open; Red means Close < Open.
 - "After a fall": the previous 5 completed candles have a net decline in
   closing price of at least 3%, and the latest candle is the green Marubozu.
 - "After a high": the previous 5 completed candles have a net rise in
   closing price of at least 3%, and the latest candle is the red Marubozu.
-- Volume confirmation: the Marubozu candle's volume must be > 10,000 shares.
-- The latest candle is always treated as a CLOSED candle because the scanner
-  runs after the Daily/Weekly candle close.
+- Volume confirmation:
+    DAILY  -> Marubozu candle volume > 60,000 shares.
+    WEEKLY -> Marubozu candle volume > 100,000 shares.
+- The latest candle is treated as the CLOSED candle.
 
 Output is created only when at least one setup is found. A *_latest.csv is
 also created only when there are results; the common cleanup/email system then
@@ -43,7 +44,7 @@ FALL_LOOKBACK = 5
 MIN_TREND_MOVE_PCT = 3.0
 MIN_BODY_RATIO = 0.90
 MAX_WICK_RATIO = 0.10
-MIN_CANDLE_VOLUME = 10000
+MIN_CANDLE_VOLUME = 60000 if TIMEFRAME == "DAILY" else 100000
 SLEEP_BETWEEN_CALLS = 0.20
 
 NSE_NIFTY500_CSV_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
@@ -142,7 +143,7 @@ def scan_symbol(symbol):
     if len(previous) < FALL_LOOKBACK:
         return None
 
-    # Volume must be greater than 10,000 shares on the Marubozu candle itself.
+    # Volume must exceed the timeframe-specific threshold on the Marubozu candle itself.
     candle_volume = float(latest["Volume"])
     if candle_volume <= MIN_CANDLE_VOLUME:
         return None
@@ -183,6 +184,7 @@ def scan_symbol(symbol):
         "UpperWickPctRange": round(upper_wick_ratio * 100, 2),
         "LowerWickPctRange": round(lower_wick_ratio * 100, 2),
         "Volume": int(candle_volume),
+        "MinVolumeRequired": MIN_CANDLE_VOLUME,
     }
 
 
