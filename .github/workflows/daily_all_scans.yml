@@ -43,6 +43,14 @@ jobs:
           TIMEFRAME: DAILY
         run: python nifty500_marubozu_reversal_scanner.py
 
+      - name: Run Hourly Marubozu reversal scanner (Nifty 500)
+        continue-on-error: true
+        env:
+          OUTPUT_DIR: output
+          LOCAL_FALLBACK_LIST: ind_nifty500list.csv
+          TIMEFRAME: HOURLY
+        run: python nifty500_marubozu_reversal_scanner.py
+
       - name: Run Breakout scanner (Nifty 500)
         continue-on-error: true
         env:
