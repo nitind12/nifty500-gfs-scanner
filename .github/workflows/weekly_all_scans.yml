@@ -28,18 +28,19 @@ jobs:
           LOCAL_FALLBACK_LIST: ind_nifty500list.csv
         run: python nifty500_rsi_screener_weekly.py
 
+      - name: Run Monthly + Weekly RSI + Daily Volume scanner (Nifty 500)
+        continue-on-error: true
+        env:
+          OUTPUT_DIR: output
+          LOCAL_FALLBACK_LIST: ind_nifty500list.csv
+        run: python nifty500_rsi_volume_mtf.py
+
       - name: Run Breakout scanner - Weekly TF (Nifty 500)
         continue-on-error: true
         env:
           OUTPUT_DIR: output
           LOCAL_FALLBACK_LIST: ind_nifty500list.csv
         run: python breakout_scanner_weekly.py
-
-      - name: Run MIB Watchlist scanner - Weekly TF
-        continue-on-error: true
-        env:
-          OUTPUT_DIR: output
-        run: python mib_scanner_yfinance_weekly.py
 
       - name: Run MIB Market scanner - Weekly TF
         continue-on-error: true
@@ -56,7 +57,7 @@ jobs:
           TF_CHOICE: "8"
         run: python nifty_engulf_scanner_weekly.py
 
-      - name: Send combined weekly email with all CSVs
+      - name: Send combined weekly email with latest CSVs only
         env:
           OUTPUT_DIR: output
           EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
