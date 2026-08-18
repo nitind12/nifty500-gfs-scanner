@@ -14,8 +14,9 @@ Definitions used here (kept deliberately objective for unattended scanning):
   of the range. Green means Close > Open; Red means Close < Open.
 - "After a fall": the previous 5 completed candles have a net decline in
   closing price of at least 3%, and the latest candle is the green Marubozu.
-- "After a high": the previous 5 completed candles have a net rise in closing
-  price of at least 3%, and the latest candle is the red Marubozu.
+- "After a high": the previous 5 completed candles have a net rise in
+  closing price of at least 3%, and the latest candle is the red Marubozu.
+- Volume confirmation: the Marubozu candle's volume must be > 10,000 shares.
 - The latest candle is always treated as a CLOSED candle because the scanner
   runs after the Daily/Weekly candle close.
 
@@ -42,6 +43,7 @@ FALL_LOOKBACK = 5
 MIN_TREND_MOVE_PCT = 3.0
 MIN_BODY_RATIO = 0.90
 MAX_WICK_RATIO = 0.10
+MIN_CANDLE_VOLUME = 10000
 SLEEP_BETWEEN_CALLS = 0.20
 
 NSE_NIFTY500_CSV_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
@@ -140,6 +142,11 @@ def scan_symbol(symbol):
     if len(previous) < FALL_LOOKBACK:
         return None
 
+    # Volume must be greater than 10,000 shares on the Marubozu candle itself.
+    candle_volume = float(latest["Volume"])
+    if candle_volume <= MIN_CANDLE_VOLUME:
+        return None
+
     pattern = marubozu_type(latest)
     if pattern is None:
         return None
@@ -175,7 +182,7 @@ def scan_symbol(symbol):
         "BodyPctRange": round(body_ratio * 100, 2),
         "UpperWickPctRange": round(upper_wick_ratio * 100, 2),
         "LowerWickPctRange": round(lower_wick_ratio * 100, 2),
-        "Volume": int(float(latest["Volume"])),
+        "Volume": int(candle_volume),
     }
 
 
@@ -187,6 +194,7 @@ def main():
     print(f"Criteria: Green Marubozu after >= {MIN_TREND_MOVE_PCT}% fall OR "
           f"Red Marubozu after >= {MIN_TREND_MOVE_PCT}% rise/high")
     print(f"Marubozu: body >= {MIN_BODY_RATIO*100:.0f}% of range; each wick <= {MAX_WICK_RATIO*100:.0f}%")
+    print(f"Volume: Marubozu candle volume > {MIN_CANDLE_VOLUME:,} shares")
 
     symbols = load_symbols()
     results = []
