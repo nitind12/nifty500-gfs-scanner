@@ -63,6 +63,21 @@ jobs:
           OUTPUT_DIR: output
         run: python pharma_breakout_scanner.py
 
+      - name: Normalize MIB and Engulfing latest CSVs
+        continue-on-error: true
+        run: |
+          DATE=$(date +%Y%m%d)
+          if [ -f "output/mib_market_scan_${DATE}.csv" ]; then
+            cp "output/mib_market_scan_${DATE}.csv" "output/mib_market_scan_latest.csv"
+          else
+            echo "MIB dated CSV not found"
+          fi
+          if [ -f "output/engulfing_scan_${DATE}.csv" ]; then
+            cp "output/engulfing_scan_${DATE}.csv" "output/engulfing_scan_latest.csv"
+          else
+            echo "Engulfing dated CSV not found"
+          fi
+
       - name: Send combined email with latest CSVs only
         env:
           OUTPUT_DIR: output
