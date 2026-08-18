@@ -35,6 +35,14 @@ jobs:
           LOCAL_FALLBACK_LIST: ind_nifty500list.csv
         run: python nifty500_rsi_volume_intraday.py
 
+      - name: Run Daily Marubozu reversal scanner (Nifty 500)
+        continue-on-error: true
+        env:
+          OUTPUT_DIR: output
+          LOCAL_FALLBACK_LIST: ind_nifty500list.csv
+          TIMEFRAME: DAILY
+        run: python nifty500_marubozu_reversal_scanner.py
+
       - name: Run Breakout scanner (Nifty 500)
         continue-on-error: true
         env:
