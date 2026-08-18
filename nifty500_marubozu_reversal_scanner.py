@@ -5,9 +5,10 @@ Finds two reversal-style candle setups on the latest CLOSED candle:
 1) GREEN Marubozu after a preceding fall.
 2) RED Marubozu after a preceding rise / local high.
 
-The same script is used by Daily and Weekly workflows through TIMEFRAME:
-    TIMEFRAME=DAILY   -> daily candles
-    TIMEFRAME=WEEKLY  -> weekly candles
+Supported timeframes:
+    DAILY   -> daily candles, volume > 60,000
+    WEEKLY  -> weekly candles, volume > 100,000
+    HOURLY  -> 1-hour candles, volume > 50,000
 
 Definitions:
 - Marubozu: candle body >= 90% of the full High-Low range and each wick <= 10%
@@ -16,10 +17,9 @@ Definitions:
   closing price of at least 3%, and the latest candle is the green Marubozu.
 - "After a high": the previous 5 completed candles have a net rise in
   closing price of at least 3%, and the latest candle is the red Marubozu.
-- Volume confirmation:
-    DAILY  -> Marubozu candle volume > 60,000 shares.
-    WEEKLY -> Marubozu candle volume > 100,000 shares.
-- The latest candle is treated as the CLOSED candle.
+- Volume confirmation is applied to the Marubozu candle itself.
+- The latest candle is treated as closed. For HOURLY, the current in-progress
+  hour is excluded when it has not completed yet.
 
 Output is created only when at least one setup is found. A *_latest.csv is
 also created only when there are results; the common cleanup/email system then
@@ -36,15 +36,29 @@ import yfinance as yf
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "output")
 TIMEFRAME = os.environ.get("TIMEFRAME", "DAILY").upper()
 
-INTERVAL = "1d" if TIMEFRAME == "DAILY" else "1wk"
-PERIOD = "2y" if TIMEFRAME == "DAILY" else "5y"
-PREFIX = "nifty500_marubozu_daily" if TIMEFRAME == "DAILY" else "nifty500_marubozu_weekly"
+if TIMEFRAME == "DAILY":
+    INTERVAL = "1d"
+    PERIOD = "2y"
+    PREFIX = "nifty500_marubozu_daily"
+    MIN_CANDLE_VOLUME = 60000
+elif TIMEFRAME == "WEEKLY":
+    INTERVAL = "1wk"
+    PERIOD = "5y"
+    PREFIX = "nifty500_marubozu_weekly"
+    MIN_CANDLE_VOLUME = 100000
+elif TIMEFRAME == "HOURLY":
+    INTERVAL = "1h"
+    # Yahoo limits intraday history; 60d is sufficient for this 5-bar setup.
+    PERIOD = "60d"
+    PREFIX = "nifty500_marubozu_hourly"
+    MIN_CANDLE_VOLUME = 50000
+else:
+    raise ValueError("TIMEFRAME must be DAILY, WEEKLY, or HOURLY")
 
 FALL_LOOKBACK = 5
 MIN_TREND_MOVE_PCT = 3.0
 MIN_BODY_RATIO = 0.90
 MAX_WICK_RATIO = 0.10
-MIN_CANDLE_VOLUME = 60000 if TIMEFRAME == "DAILY" else 100000
 SLEEP_BETWEEN_CALLS = 0.20
 
 NSE_NIFTY500_CSV_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
@@ -83,6 +97,25 @@ def load_symbols():
     raise RuntimeError("NIFTY 500 constituent list unavailable")
 
 
+def drop_incomplete_hour(df):
+    """Exclude the current in-progress 1-hour bar when it is not complete."""
+    if TIMEFRAME != "HOURLY" or df.empty:
+        return df
+
+    now = pd.Timestamp.now(tz="Asia/Kolkata")
+    last_ts = pd.Timestamp(df.index[-1])
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.tz_localize("Asia/Kolkata")
+    else:
+        last_ts = last_ts.tz_convert("Asia/Kolkata")
+
+    # Yahoo's NSE 1h timestamps represent the bar start. A bar is complete
+    # one hour after its timestamp.
+    if now < last_ts + pd.Timedelta(hours=1):
+        df = df.iloc[:-1]
+    return df
+
+
 def fetch_data(symbol):
     try:
         df = yf.download(
@@ -97,6 +130,7 @@ def fetch_data(symbol):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+        df = drop_incomplete_hour(df)
         if len(df) < FALL_LOOKBACK + 2:
             return None
         return df
@@ -143,7 +177,6 @@ def scan_symbol(symbol):
     if len(previous) < FALL_LOOKBACK:
         return None
 
-    # Volume must exceed the timeframe-specific threshold on the Marubozu candle itself.
     candle_volume = float(latest["Volume"])
     if candle_volume <= MIN_CANDLE_VOLUME:
         return None
@@ -172,7 +205,7 @@ def scan_symbol(symbol):
 
     return {
         "Symbol": symbol,
-        "Date": df.index[-1].strftime("%Y-%m-%d"),
+        "Date": df.index[-1].strftime("%Y-%m-%d %H:%M") if TIMEFRAME == "HOURLY" else df.index[-1].strftime("%Y-%m-%d"),
         "Setup": setup,
         "Pattern": "Green Marubozu" if pattern == "GREEN" else "Red Marubozu",
         "Open": round(float(latest["Open"]), 2),
