@@ -1,7 +1,7 @@
 """
-Sends ONE email with ALL CSV files found in OUTPUT_DIR attached.
-Run this as the LAST step in the combined workflow, after all scanner
-scripts have finished writing their CSVs to the same output folder.
+Sends ONE email with the latest CSV from each scanner found in OUTPUT_DIR.
+Dated historical CSVs are kept in the workflow artifact but are NOT emailed,
+so the same scanner result is no longer attached twice.
 """
 
 import os
@@ -24,28 +24,28 @@ def main():
         print("Email env vars not set - skipping combined email.")
         return
 
-    csv_files = sorted(glob.glob(os.path.join(OUTPUT_DIR, "*.csv")))
+    # Each scanner writes a *_latest.csv plus a dated historical CSV.
+    # Email only the latest copy to avoid duplicate attachments.
+    csv_files = sorted(glob.glob(os.path.join(OUTPUT_DIR, "*_latest.csv")))
     if not csv_files:
-        print(f"No CSV files found in {OUTPUT_DIR} - nothing to email.")
+        print(f"No *_latest.csv files found in {OUTPUT_DIR} - nothing to email.")
         return
 
-    print(f"Found {len(csv_files)} CSV file(s) to attach:")
+    print(f"Found {len(csv_files)} latest CSV file(s) to attach:")
     for f in csv_files:
         print(f"  - {f}")
 
     msg = MIMEMultipart()
     msg["From"] = EMAIL_ADDRESS
     msg["To"] = RECIPIENT_EMAIL
-    msg["Subject"] = f"Daily Scanner Results - {dt.date.today().isoformat()} ({len(csv_files)} files)"
+    msg["Subject"] = f"Daily Scanner Results - {dt.date.today().isoformat()} ({len(csv_files)} scanners)"
 
     body_lines = [
-        "Daily scan run complete. All scanner outputs attached:\n",
+        "Daily scan run complete. Latest result from each scanner is attached:\n",
     ]
     for f in csv_files:
         body_lines.append(f"  - {os.path.basename(f)}")
-    body_lines.append("\nScanners run: NIFTY 500 RSI, Breakout (Nifty 500), "
-                       "MIB Watchlist, MIB Market (Nifty 50 + extras), "
-                       "Engulfing @ S/R (Nifty 500, Daily).")
+    body_lines.append("\nHistorical dated CSVs remain available in the GitHub Actions artifact.")
     msg.attach(MIMEText("\n".join(body_lines), "plain"))
 
     for csv_path in csv_files:
@@ -62,7 +62,7 @@ def main():
         server.login(EMAIL_ADDRESS, EMAIL_APP_PASSWORD)
         server.sendmail(EMAIL_ADDRESS, RECIPIENT_EMAIL, msg.as_string())
         server.quit()
-        print(f"Combined email sent to {RECIPIENT_EMAIL} with {len(csv_files)} attachment(s).")
+        print(f"Combined email sent to {RECIPIENT_EMAIL} with {len(csv_files)} latest attachment(s).")
     except Exception as e:
         print(f"Email failed to send: {e}")
 
