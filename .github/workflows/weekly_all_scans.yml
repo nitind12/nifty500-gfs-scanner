@@ -57,6 +57,23 @@ jobs:
           TF_CHOICE: "8"
         run: python nifty_engulf_scanner_weekly.py
 
+      - name: Normalize weekly MIB and Engulfing latest CSVs
+        continue-on-error: true
+        run: |
+          DATE=$(date +%Y%m%d)
+          if [ -f "output/mib_market_scan_weekly_${DATE}.csv" ]; then
+            cp "output/mib_market_scan_weekly_${DATE}.csv" "output/mib_market_scan_weekly_latest.csv"
+          elif [ -f "output/mib_market_scan_${DATE}.csv" ]; then
+            cp "output/mib_market_scan_${DATE}.csv" "output/mib_market_scan_weekly_latest.csv"
+          else
+            echo "Weekly MIB dated CSV not found"
+          fi
+          if [ -f "output/engulfing_scan_weekly_${DATE}.csv" ]; then
+            cp "output/engulfing_scan_weekly_${DATE}.csv" "output/engulfing_scan_weekly_latest.csv"
+          else
+            echo "Weekly Engulfing dated CSV not found"
+          fi
+
       - name: Send combined weekly email with latest CSVs only
         env:
           OUTPUT_DIR: output
