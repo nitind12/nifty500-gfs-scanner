@@ -22,6 +22,9 @@ Designed to slot into the same GitHub Actions cron pattern as
 mib_market_scanner.py / mib_scanner_yfinance.py (see bottom of file).
 """
 
+import os
+import sys
+import time
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -36,12 +39,42 @@ warnings.filterwarnings("ignore")
 # CONFIG — tune these to match how strict you want the scan to be
 # --------------------------------------------------------------------------
 
-WATCHLIST = [
-    "RELIANCE.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "TCS.NS",
-    "SBIN.NS", "AXISBANK.NS", "KOTAKBANK.NS", "TATASTEEL.NS", "ITC.NS",
-    "LT.NS", "BAJFINANCE.NS", "MARUTI.NS", "SUNPHARMA.NS", "HINDUNILVR.NS",
-    # add / replace with your own universe
-]
+# Same conventions as the rest of the repo (mib_market_scanner.py,
+# nifty500_rsi_screener.py, etc.) so this plugs straight into the daily
+# GitHub Actions workflow.
+OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "output")
+NIFTY500_LIST_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+LOCAL_FALLBACK_LIST = os.environ.get("LOCAL_FALLBACK_LIST", "ind_nifty500list.csv")
+REQUEST_PAUSE_SEC = 0.2  # small pause between symbol fetches, be gentle on yfinance
+
+
+def get_watchlist():
+    """
+    Fetch the NIFTY 500 constituent list from NSE archives (same source used
+    by the other scanners in this repo), falling back to the local CSV
+    (ind_nifty500list.csv) when the live fetch fails.
+    """
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        df = pd.read_csv(NIFTY500_LIST_URL, storage_options={"User-Agent": headers["User-Agent"]})
+        symbols = [s.strip() + ".NS" for s in df["Symbol"].tolist()]
+        print(f"Fetched {len(symbols)} symbols from NSE archives.")
+        return symbols
+    except Exception as e:
+        print(f"Could not fetch live NIFTY 500 list ({e}). Trying local fallback...")
+        if os.path.exists(LOCAL_FALLBACK_LIST):
+            df = pd.read_csv(LOCAL_FALLBACK_LIST)
+            symbols = [s.strip() + ".NS" for s in df["Symbol"].tolist()]
+            print(f"Loaded {len(symbols)} symbols from local fallback.")
+            return symbols
+        print("No fallback list found - falling back to a small default watchlist.")
+        return [
+            "RELIANCE.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "TCS.NS",
+            "SBIN.NS", "AXISBANK.NS", "KOTAKBANK.NS", "TATASTEEL.NS", "ITC.NS",
+        ]
+
+
+WATCHLIST = None  # resolved lazily in run_scan() via get_watchlist()
 
 TIMEFRAMES = {
     # label : (yfinance interval, yfinance period, lookback bars used to
@@ -276,7 +309,7 @@ def scan_symbol_timeframe(symbol: str, tf_label: str, tf_cfg: dict) -> list:
 
 
 def run_scan(watchlist=None) -> pd.DataFrame:
-    watchlist = watchlist or WATCHLIST
+    watchlist = watchlist or get_watchlist()
     all_signals = []
 
     for symbol in watchlist:
@@ -286,6 +319,7 @@ def run_scan(watchlist=None) -> pd.DataFrame:
                 all_signals.extend(sigs)
             except Exception as e:
                 print(f"[WARN] {symbol} {tf_label}: {e}")
+        time.sleep(REQUEST_PAUSE_SEC)
 
     if not all_signals:
         return pd.DataFrame(columns=[
@@ -308,22 +342,32 @@ if __name__ == "__main__":
     print(f"Running Hammer/Inverted-Hammer S/R scan @ {datetime.now()}")
     results = run_scan()
 
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    date_str = datetime.now().strftime("%Y%m%d")
+    dated_path = os.path.join(OUTPUT_DIR, f"hammer_sr_signals_{date_str}.csv")
+    latest_path = os.path.join(OUTPUT_DIR, "hammer_sr_signals_latest.csv")
+
     if results.empty:
         print("No qualifying hammer/inverted-hammer signals at S/R right now.")
     else:
         print(results.to_string(index=False))
-        out_file = f"hammer_sr_signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
-        results.to_csv(out_file, index=False)
-        print(f"\nSaved: {out_file}")
+
+    # Always write both files (even if empty) so send_combined_email.py's
+    # has_real_data() check can correctly skip it when there's nothing to send.
+    results.to_csv(dated_path, index=False)
+    results.to_csv(latest_path, index=False)
+    print(f"\nSaved: {dated_path}\nSaved: {latest_path}")
 
 # --------------------------------------------------------------------------
-# GitHub Actions integration (optional)
+# GitHub Actions integration
 # --------------------------------------------------------------------------
-# Drop this alongside mib_market_scanner.py and reuse the same workflow
-# pattern (e.g. .github/workflows/scan.yml) that already runs at 3:50 PM IST:
+# Add this step to .github/workflows/daily_all_scans.yml, before the
+# "Send combined email" step, so its *_latest.csv gets picked up
+# automatically by send_combined_email.py:
 #
-#   - name: Run hammer S/R scan
+#   - name: Run Hammer/Inverted-Hammer @ S-R scanner (Nifty 500, Daily+Hourly)
+#     continue-on-error: true
+#     env:
+#       OUTPUT_DIR: output
+#       LOCAL_FALLBACK_LIST: ind_nifty500list.csv
 #     run: python hammer_sr_scanner.py
-#
-# Then extend your existing email step to attach hammer_sr_signals_*.csv
-# the same way it already attaches the MIB scanner's CSV output.
