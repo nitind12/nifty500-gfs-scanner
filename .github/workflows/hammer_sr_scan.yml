@@ -1,0 +1,44 @@
+name: Hammer / Inverted-Hammer @ S-R Scan
+
+on:
+    # schedule:
+    # 10:20 UTC = 3:50 PM IST, Monday-Friday (already runs as part of
+    # daily_all_scans.yml — uncomment here only if you want this scanner
+    # to ALSO run standalone on its own schedule)
+    # - cron: '20 10 * * 1-5'
+  workflow_dispatch: {}
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pandas numpy yfinance requests
+
+      - name: Run Hammer/Inverted-Hammer @ S-R scanner (Daily + Hourly)
+        env:
+          OUTPUT_DIR: output
+          LOCAL_FALLBACK_LIST: ind_nifty500list.csv
+        run: python hammer_sr_scanner.py
+
+      - name: Email results (if any signals found)
+        env:
+          OUTPUT_DIR: output
+          EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+        run: python send_combined_email.py
+
+      - name: Upload CSV as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hammer-sr-scan-results
+          path: output/*.csv
