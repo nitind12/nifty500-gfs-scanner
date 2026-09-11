@@ -1,11 +1,12 @@
 name: Hammer / Inverted-Hammer @ S-R Scan
 
 on:
-    # schedule:
-    # 10:20 UTC = 3:50 PM IST, Monday-Friday (already runs as part of
-    # daily_all_scans.yml — uncomment here only if you want this scanner
-    # to ALSO run standalone on its own schedule)
-    # - cron: '20 10 * * 1-5'
+  schedule:
+    # All times IST (UTC+5:30), Monday-Friday only (market days)
+    - cron: '46 3 * * 1-5'   # 9:16 AM IST
+    - cron: '46 5 * * 1-5'   # 11:16 AM IST
+    - cron: '46 7 * * 1-5'   # 1:16 PM IST
+    - cron: '30 9 * * 1-5'   # 3:00 PM IST
   workflow_dispatch: {}
 
 jobs:
