@@ -1,9 +1,21 @@
 """
 hammer_sr_scanner.py
 =====================
-Scans a watchlist for:
-  1. HAMMER candle forming AT SUPPORT   -> potential bullish reversal
-  2. INVERTED HAMMER candle forming AT RESISTANCE -> potential bearish reversal
+Scans a watchlist for a LIQUIDITY-SWEEP + REVERSAL-CANDLE combo:
+
+  1. LIQUIDITY SWEEP OF SUPPORT + HAMMER
+     -> price pierces below a known support level (stop-hunt / liquidity
+        grab) but the SAME candle closes back above it, and the candle
+        itself is shaped like a trustworthy hammer.
+  2. LIQUIDITY SWEEP OF RESISTANCE + INVERTED HAMMER
+     -> price pierces above a known resistance level but closes back
+        below it, shaped like a trustworthy inverted hammer.
+
+A hammer sitting "near" a level with no actual sweep is NOT enough on its
+own anymore — it only fires when the level was genuinely swept (liquidity
+taken) and then reclaimed inside that same candle. This mirrors the
+Liquidity Sweep Rule already used in the MIB framework (Case 2: single
+large/decisive candle sweep).
 
 Checked on BOTH:
   - Daily timeframe
@@ -15,15 +27,20 @@ Candle-quality filter ("long enough to trust"):
   average candle range (ATR). Tiny dojis with a technically-correct
   wick ratio but no real size are rejected.
 
+De-duplication:
+  Only ONE signal per (Symbol, Timeframe, Pattern) is kept — the most
+  recent qualifying candle — so you no longer get repeated/redundant
+  rows for the same stock+timeframe (e.g. GMDCLTD.NS showing up 2-3
+  times because several recent bars all sat near the same level).
+
 Data source : yfinance (swap in your Dhan/broker feed if you prefer)
 Author      : generated for Nitin Deepak's MIB scanner suite
 Usage       : python hammer_sr_scanner.py
 Designed to slot into the same GitHub Actions cron pattern as
-mib_market_scanner.py / mib_scanner_yfinance.py (see bottom of file).
+mib_market_scanner.py / mib_scanner_yfinance.py.
 """
 
 import os
-import sys
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -74,8 +91,6 @@ def get_watchlist():
         ]
 
 
-WATCHLIST = None  # resolved lazily in run_scan() via get_watchlist()
-
 TIMEFRAMES = {
     # label : (yfinance interval, yfinance period, lookback bars used to
     #          build support/resistance zones)
@@ -86,7 +101,15 @@ TIMEFRAMES = {
 # --- Support / Resistance detection -----------------------------------
 SR_SWING_ORDER = 3        # bars on each side to confirm a swing high/low pivot
 SR_CLUSTER_PCT = 0.005    # merge pivot levels within 0.5% of each other
-SR_PROXIMITY_PCT = 0.006  # candle must be within 0.6% of a level to "be at" it
+
+# --- Liquidity sweep rules -------------------------------------------------
+# The wick must pierce THROUGH the level (not just sit near it), and the
+# body must close back on the "right" side of it within the same candle.
+# MAX_SWEEP_DEPTH_ATR caps how far beyond the level price is allowed to have
+# gone — too deep a pierce means it's a genuine breakdown/breakout, not a
+# stop-hunt sweep of that specific level.
+MAX_SWEEP_DEPTH_ATR = 1.5
+MIN_SWEEP_DEPTH_ATR = 0.05   # trivially small piercing (rounding noise) rejected
 
 # --- Hammer / Inverted-Hammer shape rules --------------------------------
 MIN_WICK_TO_BODY_RATIO = 2.5   # dominant wick must be >= 2.5x the body
@@ -97,6 +120,7 @@ MIN_WICK_TO_ATR_RATIO = 0.60   # "long enough to trust": dominant wick must be
 ATR_PERIOD = 14
 
 # candles scanned for a fresh signal, from the most recent bar backwards
+# (final output is still de-duplicated down to 1 per Symbol+Timeframe+Pattern)
 RECENT_BARS_TO_CHECK = 3
 
 
@@ -108,13 +132,14 @@ RECENT_BARS_TO_CHECK = 3
 class Signal:
     symbol: str
     timeframe: str
-    pattern: str            # "Hammer @ Support" / "Inverted Hammer @ Resistance"
+    pattern: str            # "Liquidity Sweep + Hammer @ Support" / "... Inverted Hammer @ Resistance"
     candle_time: pd.Timestamp
     close: float
     level: float
     level_type: str          # "Support" / "Resistance"
     wick_to_body: float
     wick_to_atr: float
+    sweep_depth_atr: float
     quality: str = field(default="")  # STRONG / OK, set after scoring
 
     def as_row(self):
@@ -128,6 +153,7 @@ class Signal:
             "LevelType": self.level_type,
             "WickToBody": round(self.wick_to_body, 2),
             "WickToATR": round(self.wick_to_atr, 2),
+            "SweepDepthATR": round(self.sweep_depth_atr, 2),
             "Quality": self.quality,
         }
 
@@ -193,18 +219,43 @@ def find_swing_levels(df: pd.DataFrame, lookback: int, order: int = SR_SWING_ORD
     return cluster(lows), cluster(highs)
 
 
-def near_level(price: float, levels, pct: float = SR_PROXIMITY_PCT):
-    """Return the nearest level if price is within pct of it, else None."""
+def find_liquidity_sweep_level(extreme: float, close: float, levels: list,
+                                direction: str, atr: float):
+    """
+    direction = 'support'    -> candle's LOW must pierce below a support
+                                 level, then CLOSE back above it.
+    direction = 'resistance' -> candle's HIGH must pierce above a
+                                 resistance level, then CLOSE back below it.
+
+    Returns (level, sweep_depth) for the cleanest valid sweep (smallest
+    pierce depth, i.e. the level that was JUST swept, not blown through),
+    or (None, None) if no level qualifies.
+    """
+    if not atr or atr <= 0:
+        return None, None
+
+    candidates = []
     for lvl in levels:
-        if abs(price - lvl) / lvl <= pct:
-            return lvl
-    return None
+        if direction == "support":
+            depth = lvl - extreme          # positive if low pierced below lvl
+            reclaimed = close > lvl
+        else:
+            depth = extreme - lvl          # positive if high pierced above lvl
+            reclaimed = close < lvl
+
+        if reclaimed and depth > 0:
+            depth_atr = depth / atr
+            if MIN_SWEEP_DEPTH_ATR <= depth_atr <= MAX_SWEEP_DEPTH_ATR:
+                candidates.append((lvl, depth))
+
+    if not candidates:
+        return None, None
+
+    candidates.sort(key=lambda x: x[1])  # smallest (cleanest) pierce first
+    return candidates[0]
 
 
 def classify_candle(o, h, l, c):
-    """
-    Returns dict with body, upper_wick, lower_wick, total_range for one candle.
-    """
     body = abs(c - o)
     upper_wick = h - max(o, c)
     lower_wick = min(o, c) - l
@@ -257,9 +308,9 @@ def is_trustworthy_inverted_hammer(o, h, l, c, atr):
     return passed, wick_to_body, wick_to_atr
 
 
-def score_quality(wick_to_body: float, wick_to_atr: float) -> str:
-    """Simple STRONG / OK tag so you can eyeball priority at a glance."""
-    if wick_to_body >= 4 and wick_to_atr >= 1.0:
+def score_quality(wick_to_body: float, wick_to_atr: float, sweep_depth_atr: float) -> str:
+    """STRONG needs a decisive candle AND a real (not trivial) sweep."""
+    if wick_to_body >= 4 and wick_to_atr >= 1.0 and sweep_depth_atr >= 0.15:
         return "STRONG"
     return "OK"
 
@@ -285,27 +336,44 @@ def scan_symbol_timeframe(symbol: str, tf_label: str, tf_cfg: dict) -> list:
         if pd.isna(atr):
             continue
 
-        # -- Hammer at support --------------------------------------------
-        support_hit = near_level(l, supports) or near_level(c, supports)
-        if support_hit:
+        # -- Liquidity sweep of support + Hammer ---------------------------
+        support_level, sweep_depth = find_liquidity_sweep_level(l, c, supports, "support", atr)
+        if support_level is not None:
             ok, w2b, w2atr = is_trustworthy_hammer(o, h, l, c, atr)
             if ok:
-                sig = Signal(symbol, tf_label, "Hammer @ Support", ts, c,
-                              support_hit, "Support", w2b, w2atr)
-                sig.quality = score_quality(w2b, w2atr)
+                sweep_depth_atr = sweep_depth / atr
+                sig = Signal(symbol, tf_label, "Liquidity Sweep + Hammer @ Support", ts, c,
+                              support_level, "Support", w2b, w2atr, sweep_depth_atr)
+                sig.quality = score_quality(w2b, w2atr, sweep_depth_atr)
                 signals.append(sig)
 
-        # -- Inverted hammer at resistance ---------------------------------
-        resistance_hit = near_level(h, resistances) or near_level(c, resistances)
-        if resistance_hit:
+        # -- Liquidity sweep of resistance + Inverted hammer ----------------
+        resistance_level, sweep_depth = find_liquidity_sweep_level(h, c, resistances, "resistance", atr)
+        if resistance_level is not None:
             ok, w2b, w2atr = is_trustworthy_inverted_hammer(o, h, l, c, atr)
             if ok:
-                sig = Signal(symbol, tf_label, "Inverted Hammer @ Resistance", ts, c,
-                              resistance_hit, "Resistance", w2b, w2atr)
-                sig.quality = score_quality(w2b, w2atr)
+                sweep_depth_atr = sweep_depth / atr
+                sig = Signal(symbol, tf_label, "Liquidity Sweep + Inverted Hammer @ Resistance", ts, c,
+                              resistance_level, "Resistance", w2b, w2atr, sweep_depth_atr)
+                sig.quality = score_quality(w2b, w2atr, sweep_depth_atr)
                 signals.append(sig)
 
     return signals
+
+
+def dedupe_signals(signals: list) -> list:
+    """
+    Keep only ONE signal per (Symbol, Timeframe, Pattern) - the most recent
+    candle. This is what removes redundant repeated rows for the same
+    stock+timeframe (e.g. several recent bars all qualifying near the same
+    level).
+    """
+    best = {}
+    for sig in signals:
+        key = (sig.symbol, sig.timeframe, sig.pattern)
+        if key not in best or sig.candle_time > best[key].candle_time:
+            best[key] = sig
+    return list(best.values())
 
 
 def run_scan(watchlist=None) -> pd.DataFrame:
@@ -321,10 +389,12 @@ def run_scan(watchlist=None) -> pd.DataFrame:
                 print(f"[WARN] {symbol} {tf_label}: {e}")
         time.sleep(REQUEST_PAUSE_SEC)
 
+    all_signals = dedupe_signals(all_signals)
+
     if not all_signals:
         return pd.DataFrame(columns=[
             "Symbol", "Timeframe", "Pattern", "CandleTime", "Close",
-            "Level", "LevelType", "WickToBody", "WickToATR", "Quality"
+            "Level", "LevelType", "WickToBody", "WickToATR", "SweepDepthATR", "Quality"
         ])
 
     result = pd.DataFrame([s.as_row() for s in all_signals])
@@ -339,7 +409,7 @@ def run_scan(watchlist=None) -> pd.DataFrame:
 # --------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print(f"Running Hammer/Inverted-Hammer S/R scan @ {datetime.now()}")
+    print(f"Running Liquidity-Sweep + Hammer/Inverted-Hammer S/R scan @ {datetime.now()}")
     results = run_scan()
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -348,7 +418,7 @@ if __name__ == "__main__":
     latest_path = os.path.join(OUTPUT_DIR, "hammer_sr_signals_latest.csv")
 
     if results.empty:
-        print("No qualifying hammer/inverted-hammer signals at S/R right now.")
+        print("No qualifying liquidity-sweep + hammer/inverted-hammer signals right now.")
     else:
         print(results.to_string(index=False))
 
@@ -361,13 +431,8 @@ if __name__ == "__main__":
 # --------------------------------------------------------------------------
 # GitHub Actions integration
 # --------------------------------------------------------------------------
-# Add this step to .github/workflows/daily_all_scans.yml, before the
-# "Send combined email" step, so its *_latest.csv gets picked up
-# automatically by send_combined_email.py:
-#
-#   - name: Run Hammer/Inverted-Hammer @ S-R scanner (Nifty 500, Daily+Hourly)
-#     continue-on-error: true
-#     env:
-#       OUTPUT_DIR: output
-#       LOCAL_FALLBACK_LIST: ind_nifty500list.csv
-#     run: python hammer_sr_scanner.py
+# Already wired into:
+#   - .github/workflows/daily_all_scans.yml   (runs as part of the combined
+#     3:50 PM IST daily run)
+#   - .github/workflows/hammer_sr_scan.yml     (standalone run, 4x/day
+#     between 9:16 AM and 3:00 PM IST, weekdays)
