@@ -1,12 +1,11 @@
 name: Hammer / Inverted-Hammer @ S-R Scan
 
 on:
-  schedule:
-    # All times IST (UTC+5:30), Monday-Friday only (market days)
-    - cron: '46 3 * * 1-5'   # 9:16 AM IST
-    - cron: '46 5 * * 1-5'   # 11:16 AM IST
-    - cron: '46 7 * * 1-5'   # 1:16 PM IST
-    - cron: '30 9 * * 1-5'   # 3:00 PM IST
+  # GitHub's own `schedule:` cron trigger is best-effort only and can be
+  # delayed/bunched during high load, so timing is instead handled by an
+  # external cron service (cron-job.org) calling this workflow's
+  # workflow_dispatch endpoint at exact times - see repo README / chat
+  # notes for the 4 scheduled times (9:16 AM, 11:16 AM, 1:16 PM, 3:00 PM IST).
   workflow_dispatch: {}
 
 jobs:
