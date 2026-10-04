@@ -1,0 +1,66 @@
+name: SMA30 Cross-Above Scan
+
+on:
+  # Timing handled by external cron-job.org via workflow_dispatch (same as other scanners).
+  # Optional GitHub schedule (uncomment if wanted): 10:20 UTC = 3:50 PM IST, Mon-Fri
+  # schedule:
+  #   - cron: '20 10 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      lookback:
+        description: 'Cross must be within last N candles'
+        required: false
+        default: '3'
+      slope_bars:
+        description: 'SMA30 must be higher than N candles ago'
+        required: false
+        default: '5'
+      min_vol_ratio:
+        description: 'Min volume / 20-day avg volume (0 = off)'
+        required: false
+        default: '0'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pandas numpy yfinance requests
+
+      - name: Run SMA30 Cross-Above scanner (Nifty 500, Daily)
+        env:
+          OUTPUT_DIR: output
+          LOCAL_FALLBACK_LIST: ind_nifty500list.csv
+          CROSS_LOOKBACK_BARS: ${{ github.event.inputs.lookback || '3' }}
+          SLOPE_BARS: ${{ github.event.inputs.slope_bars || '5' }}
+          MIN_VOL_RATIO: ${{ github.event.inputs.min_vol_ratio || '0' }}
+        run: python nifty500_sma30_cross_scanner.py
+
+      - name: Remove scanner output if no eligible data
+        continue-on-error: true
+        env:
+          OUTPUT_DIR: output
+        run: python cleanup_empty_scan_results.py
+
+      - name: Send email with SMA30 results
+        env:
+          OUTPUT_DIR: output
+          EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+        run: python send_combined_email.py
+
+      - name: Upload CSVs as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sma30-cross-results
+          path: output/*.csv
+          if-no-files-found: ignore
