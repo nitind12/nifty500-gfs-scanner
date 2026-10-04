@@ -100,7 +100,12 @@ jobs:
           else
             echo "Engulfing dated CSV not found"
           fi
-
+      - name: Run SMA30 Cross-Above scanner (Nifty 500, Daily)
+        continue-on-error: true
+        env:
+          OUTPUT_DIR: output
+          LOCAL_FALLBACK_LIST: ind_nifty500list.csv
+        run: python nifty500_sma30_cross_scanner.py
       - name: Remove scanners with no eligible data
         continue-on-error: true
         env:
